@@ -5,30 +5,35 @@
 #include <iomanip>
 #include <algorithm>
 #include <sstream>
-
+#include <chrono>
+#include <omp.h>
 
 using namespace std;
 
 // ------------------------------------------------------------
 // Global parameters
 // ------------------------------------------------------------
+#pragma omp declare target
 const double gamma_val = 1.4;   // Ratio of specific heats
 const double CFL = 0.5;         // CFL number
 
 // ------------------------------------------------------------
 // Compute pressure from the conservative variables
 // ------------------------------------------------------------
-double pressure(double rho, double rhou, double rhov, double E) {
+
+inline double pressure(double rho, double rhou, double rhov, double E) {
     double u = rhou / rho;
     double v = rhov / rho;
     double kinetic = 0.5 * rho * (u * u + v * v);
     return (gamma_val - 1.0) * (E - kinetic);
 }
+#pragma omp end declare target
 
 // ------------------------------------------------------------
 // Compute flux in the x-direction
 // ------------------------------------------------------------
-void fluxX(double rho, double rhou, double rhov, double E, 
+#pragma omp declare target
+inline void fluxX(double rho, double rhou, double rhov, double E, 
            double& frho, double& frhou, double& frhov, double& fE) {
     double u = rhou / rho;
     double p = pressure(rho, rhou, rhov, E);
@@ -41,7 +46,7 @@ void fluxX(double rho, double rhou, double rhov, double E,
 // ------------------------------------------------------------
 // Compute flux in the y-direction
 // ------------------------------------------------------------
-void fluxY(double rho, double rhou, double rhov, double E,
+inline void fluxY(double rho, double rhou, double rhov, double E,
            double& frho, double& frhou, double& frhov, double& fE) {
     double v = rhov / rho;
     double p = pressure(rho, rhou, rhov, E);
@@ -50,6 +55,7 @@ void fluxY(double rho, double rhou, double rhov, double E,
     frhov = rhov * v + p;
     fE = (E + p) * v;
 }
+#pragma omp end declare target
 
 // ------------------------------------------------------------
 // Main simulation routine
@@ -134,9 +140,12 @@ int main(){
     // ----- Time stepping parameters -----
     const int nSteps = 2000;
 
+    #pragma omp target enter data map(to:rho[0:(Nx+2)*(Ny+2)], rhou[0:(Nx+2)*(Ny+2)], rhov[0:(Nx+2)*(Ny+2)], E[0:(Nx+2)*(Ny+2)])
+
     // ----- Main time-stepping loop -----
     for (int n = 0; n < nSteps; n++){
         // --- Apply boundary conditions on ghost cells ---
+        #pragma omp target teams distribute parallel for
         // Left boundary (inflow): fixed free-stream state
         for (int j = 0; j < Ny+2; j++){
             rho[0*(Ny+2)+j] = rho0;
@@ -167,6 +176,7 @@ int main(){
         }
 
         // --- Update interior cells using a Lax-Friedrichs scheme ---
+        #pragma omp target teams distribute parallel for collapse(2) 
         for (int i = 1; i <= Nx; i++){
             for (int j = 1; j <= Ny; j++){
                 // If the cell is inside the solid obstacle, do not update it
@@ -215,6 +225,9 @@ int main(){
         }
 
         // Copy updated values back
+        #pragma omp target update from(rho_new[0:(Nx+2)*(Ny+2)],rhou_new[0:(Nx+2)*(Ny+2)],rhov_new[0:(Nx+2)*(Ny+2)],E_new[0:(Nx+2)*(Ny+2)])
+
+        #pragma omp target teams distribute parallel for collapse(2)
         for (int i = 1; i <= Nx; i++){
             for (int j = 1; j <= Ny; j++){
                 rho[i*(Ny+2)+j] = rho_new[i*(Ny+2)+j];
@@ -223,7 +236,7 @@ int main(){
                 E[i*(Ny+2)+j] = E_new[i*(Ny+2)+j];
             }
         }
-
+        # pragma omp target exit data map(delete: rho[0:(Nx+2)*(Ny+2)], rhou[0:(Nx+2)*(Ny+2)],rhov[0:(Nx+2)*(Ny+2)], E[0:(Nx+2)*(Ny+2)])
         // Calculate total kinetic energy
         double total_kinetic = 0.0;
         for (int i = 1; i <= Nx; i++) {
